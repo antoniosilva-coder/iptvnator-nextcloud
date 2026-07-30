@@ -1,0 +1,475 @@
+# Embedded Inline Playback
+
+This document records the current contract for embedded playback in portal detail views.
+
+## Summary
+
+- Embedded web players are `videojs`, `html5`, and `artplayer`.
+- `embedded-mpv` exists as a hidden desktop experimental harness backed by a native MPV addon. macOS and Windows use in-process `libmpv`; Linux uses an X11/Xwayland child window with an out-of-process `mpv --wid` backend.
+- Controlled external players are `mpv` and `vlc`.
+- macOS `.app` bundle paths are resolved only for real MPV/VLC apps. IINA may
+  launch through the MPV path field when the user supplies an executable path
+  such as `/Applications/IINA.app/Contents/MacOS/iina-cli`, but IPTVnator
+  controls, position polling, and instance reuse are not guaranteed for IINA.
+- Flatpak launches external players on the host via `flatpak-spawn --host`.
+- Live playback stays inline in dedicated live layouts.
+- VOD and series detail playback stays inline on canonical detail, collection,
+  favorites, recent, and search surfaces.
+- Xtream and Stalker series detail heroes expose a quick-start CTA driven by
+  saved episode playback positions.
+- Embedded playback UI is always hosted by the current view. `PlayerService`
+  launches MPV/VLC only and does not open an embedded-player dialog.
+- Browser-player failures are diagnosed client-side and can offer explicit MPV/VLC fallback actions without changing the saved player setting.
+
+## Scope
+
+Inline embedded playback is required for these VOD/series entry points:
+
+- Xtream VOD detail route
+- Xtream series detail route
+- Stalker VOD detail view
+- Stalker series detail view
+- unified favorites collection details
+- unified recently viewed collection details
+- Stalker advanced search result details
+
+Collection/search VOD surfaces that expose embedded playback must host
+`ResolvedPortalPlayback` inline state locally. They must not call
+`PlayerService.openPlayer(...)` or `PlayerService.openResolvedPlayback(...)` to
+create embedded UI.
+
+## Embedded MPV Harness
+
+The repository now contains a first-pass native embedded MPV harness for Electron:
+
+- shared setting id: `embedded-mpv`
+- native addon owner: `/Users/4gray/Code/iptvnator/apps/electron-backend/src/app/services/embedded-mpv-native.service.ts`
+- IPC bridge: `/Users/4gray/Code/iptvnator/apps/electron-backend/src/app/events/embedded-mpv.events.ts`
+- renderer host: `/Users/4gray/Code/iptvnator/libs/ui/playback/src/lib/embedded-mpv-player/embedded-mpv-player.component.ts`
+- native architecture and release-readiness details: `/Users/4gray/Code/iptvnator/docs/architecture/embedded-mpv-native.md`
+
+Current contract:
+
+- desktop only: macOS, Windows x64, and Linux x64 under X11/Xwayland
+- experimental opt-in
+- enabled in local development only when `IPTVNATOR_ENABLE_EMBEDDED_MPV_EXPERIMENT=1`
+- Linux Wayland sessions must start Electron through Xwayland, for example with `pnpm nx run electron-backend:serve-electron --args=--ozone-platform=x11` during local development or `iptvnator --ozone-platform=x11` for a packaged app
+- enabled in packaged desktop builds only when the bundled native addon/runtime prerequisites are present; Linux additionally requires an `mpv` executable on `PATH`
+- uses IPTVnator-owned controls and `ResolvedPortalPlayback` payloads
+- uses the libmpv render API on macOS and renders through an IPTVnator-owned native `NSView`
+- uses mpv `wid` embedding on Windows and Linux through IPTVnator-owned native child windows
+- Linux starts `mpv --wid=<x11-window>` out of process so MPV does not share Electron's FFmpeg or graphics symbols
+- Linux controls that out-of-process MPV instance through a private JSON IPC socket so duration, position, pause, volume, and seek state come from MPV instead of renderer guesses
+- Linux starts that MPV process with `WAYLAND_DISPLAY` removed, `XDG_SESSION_TYPE=x11`, and X11 video output options; otherwise MPV can pick Wayland inside a Wayland desktop session, ignore `--wid`, and open a separate window instead of embedding
+- macOS/Windows default to libmpv's OpenGL render backend with `hwdec=auto-safe`
+- keeps the previous software renderer as a debug fallback via `IPTVNATOR_EMBEDDED_MPV_RENDERER=sw`
+- emits lightweight native diagnostics when `IPTVNATOR_TRACE_EMBEDDED_MPV=1` is set; Linux also writes MPV's own trace log to `/tmp/iptvnator-embedded-mpv.log`
+- exposes an IPTVnator-owned fullscreen button that uses the renderer fullscreen API and resyncs the native MPV view bounds after fullscreen transitions
+- auto-hides IPTVnator-owned controls while playback is active and restores them on pointer/focus interaction
+- exposes audio-track metadata from MPV and switches tracks through the `aid` property without reloading the stream
+- passes VOD/episode resume offsets to MPV through the `loadfile` options map; live catchup URLs are treated as already-positioned streams
+- applies the initial volume during session creation and uses async libmpv control calls after startup where the in-process libmpv backend is active
+- VLC remains external-only
+
+Current limitation:
+
+- the current feasibility harness is still experimental and platform-specific
+- the original macOS `wid` embedding path produced audio with a black video surface inside Electron, so the harness now avoids foreign-window embedding on macOS
+- Windows and Linux use the mpv `wid` path and still need OS-native packaged smoke coverage before public exposure
+- Linux native Wayland is not supported in this implementation; the Electron process must have `DISPLAY` through X11/Xwayland and a real X11 window handle
+- the OpenGL render path avoids the old per-frame `CGImage` copy path, but it still needs broader interaction, resize, and packaging coverage
+- startup deadlocks seen during early macOS playback bring-up are mitigated, but the feature is still kept behind the explicit experiment flag until more interaction and packaging coverage is proven
+- because of that, the setting is auto-sanitized back to the default inline player unless support detection reports that the experimental runtime is available
+- this follows the rollout gate: keep the native work in-tree, but do not leave it user-facing until playback, resize, focus, and packaging are stable
+
+## Two-State Detail Layout (Browse ↔ Watch)
+
+Portal VOD/series detail pages are hosted by the shared
+`PortalDetailShellComponent`
+(`libs/ui/components/src/lib/portal-detail-shell/portal-detail-shell.component.ts`),
+which owns the page scroll container and two layout states:
+
+- **Browse** (`playbackActive=false`): the hero (`ContentHeroComponent`,
+  now a natural-height, non-scrolling block) renders poster, title, chips,
+  description, credits, and actions. Episodes render below.
+- **Watch** (`playbackActive=true`, bound by hosts to
+  `inlinePlayback() !== null`): the hero collapses (~300ms CSS morph,
+  disabled under `prefers-reduced-motion`), the host-projected
+  `[detail-player]` slot renders the inline player at full content width,
+  and the shell renders an About block (`ContentAboutComponent`) below the
+  `[detail-episodes]` slot so the hero metadata stays reachable.
+
+Contracts:
+
+- Hosts provide hero chips/meta/actions as `*appDetailTags` / `*appDetailMeta` /
+  `*appDetailActions` templates; the shell stamps them into the hero and again
+  into the About block. Degradation stays "missing → not rendered".
+- The shell never wraps the `[detail-player]` slot in a conditional; the
+  host's `@if (inlinePlayback())` is the only creator/destroyer of the
+  player subtree, so shell state changes cannot recreate the `<video>`.
+- **External MPV/VLC sessions do not flip the layout to watch** — browse
+  layout stays, and the primary CTA keeps its "Stop <player>" behavior.
+- Escape closes inline playback: the shell emits `closePlayerRequested`
+  when playback is active, the event was not `defaultPrevented`, and no
+  element is in browser fullscreen; hosts wire it to `closeInlinePlayer()`.
+- The now-playing bar separates two exits: the back arrow emits
+  `backClicked`, which hosts wire to their route-level `goBack()` (straight
+  back to the list — everything browse offers is also visible in watch, so
+  a two-step unwind would be ceremony); the "Close player" button and
+  Escape emit `closed`/`closePlayerRequested` and return to browse without
+  navigating.
+- Entering watch scrolls the shell to the top; leaving keeps the scroll
+  position.
+
+### Inline player stage (theater + ambient fill)
+
+`PortalInlinePlayerComponent`
+(`libs/ui/playback/src/lib/portal-inline-player/`) wraps the projected
+`WebPlayerViewComponent` in a `.player-shell__viewport` "theater stage".
+The stage spans the full content width and is capped at
+`min(70vh, 720px)`; on wide-short windows it becomes wider than 16:9. The
+player is sized as the largest 16:9 box that fits the stage height and is
+centered, so the leftover is always the stage's own black background — never
+a stray strip of app surface. This is the YouTube-style letterbox and is the
+default behavior for every inline engine.
+
+The optional `playerAmbientMode` setting (Settings → Playback, default off,
+shown only for the built-in web players) renders a blurred, dimmed copy of the
+poster (`ResolvedPortalPlayback.thumbnail`) behind the player via the
+`--ambient-image` custom property, turning the letterbox margins into
+atmosphere (YouTube "Ambient mode" / Netflix backdrops). The component also
+enforces the web-player scope at runtime (HTML5, Video.js, ArtPlayer): with
+Embedded MPV selected, a persisted `playerAmbientMode=true` never renders the
+layer, keeping extra DOM out of the native-video compositing path. Live
+channels are excluded (their `thumbnail` is a logo), and only
+`http(s):`/`data:` poster URLs are accepted to avoid CSS `url()` breakout.
+
+### Up Next side rail (series)
+
+For inline **series** playback the stage can trade its centered letterbox for
+a Netflix/Plex-style layout: the player docks left and the leftover column
+becomes an "Up Next" episode rail (`app-up-next-rail`,
+`libs/ui/playback/src/lib/portal-inline-player/up-next-rail.component.ts`).
+The rail lists the currently playing episode (highlighted, click-inert)
+followed by the rest of its season and a spillover into the following
+seasons, with per-episode watch-progress bars from playback positions.
+
+- Data flow: the hosts (Xtream `SerialDetailsComponent`, Stalker
+  `StalkerSeriesViewComponent`) build the entries with
+  `buildUpNextRailItems()` (`up-next-rail.util.ts`) from their
+  season→episodes map, the inline episode state, and the playback-position
+  map, and pass them into `PortalInlinePlayerComponent` via the
+  `upNextEpisodes` input. Selection comes back through
+  `upNextEpisodeSelected`, carrying the host's raw episode object, and is
+  routed into the host's existing episode-play flow — the same path the
+  season container uses.
+- Width gating: a ResizeObserver on `.player-shell__viewport` feeds the
+  component's `stageSize` with the stage's **border-box** size, and the gate
+  computes the width the rail would actually receive — stage minus the docked
+  layout's padding, minus the 16:9 player sized to the remaining height, minus
+  the flex gap (`RAIL_STAGE_PADDING` / `RAIL_STAGE_GAP`, kept in sync with the
+  stylesheet). The rail docks in only when that is ≥ 320px
+  (`UP_NEXT_RAIL_MIN_WIDTH`). Measuring the border box matters: the docked
+  modifier adds padding to the same element being observed, so a content-box
+  measurement would change the input the moment the rail appears and could
+  oscillate around the threshold. On near-16:9 or taller windows the rail
+  auto-hides and the centered theater/ambient behavior above remains.
+- Lazy Stalker seasons: Ministra VOD-series seasons carry no episodes until
+  their tab is opened, so `StalkerSeriesViewComponent` prefetches the season
+  after the playing one while inline playback is active — otherwise the rail's
+  next-season spillover would silently stop at the current season's end. The
+  prefetch is claimed synchronously and answered seasons (including genuinely
+  empty ones) are never re-requested: a failed request leaves `episodes` empty
+  with `isLoading` back to false, which would otherwise re-run the effect that
+  issued it and loop. A *failed* request releases the claim but is pinned to
+  the episode that triggered it, so a transient portal error retries on the
+  next playback change instead of either looping or giving up permanently.
+- Gating mirrors ambient mode: the `playerUpNextRail` setting (Settings →
+  Playback, **default on**, shown only for the built-in web players) plus a
+  runtime web-engine check; the rail also requires
+  `contentInfo.contentType === 'episode'` and non-live playback, so movies
+  and live channels always keep the centered stage.
+- Layering: the rail is an opaque panel rendered on top of the stage, so the
+  ambient fill stays behind it and shows in the flexible gap between the
+  docked player and the rail on very wide stages.
+
+Season navigation inside `SeasonContainerComponent` uses season tabs
+(`SeasonTabsComponent`; a dropdown beyond 6 seasons) instead of the old
+seasons-grid + "Back to seasons" level. A season is auto-selected
+(inline-playing episode's season → most recently updated in-progress
+episode's season → first) and the auto-selection emits `seasonSelected`,
+so host lazy-load/enrichment hooks (Stalker VOD-series episode fetch,
+TMDB season fetch, Xtream `enrichSelectedSerialSeason`) fire on open
+without a click. Switching tabs never stops playback; a "back to playing
+episode" chip appears when the playing episode is outside the opened
+season. Season descriptions come from `get_series_info` seasons (Xtream)
+or `TmdbEnrichmentService.getSeason` (Stalker).
+
+## Components
+
+Shared detail layout shell:
+
+- `/Users/4gray/Code/iptvnator/libs/ui/components/src/lib/portal-detail-shell/portal-detail-shell.component.ts`
+
+Shared inline player shell:
+
+- `/Users/4gray/Code/iptvnator/libs/ui/playback/src/lib/portal-inline-player/portal-inline-player.component.ts`
+
+Xtream detail hosts:
+
+- `/Users/4gray/Code/iptvnator/libs/portal/xtream/feature/src/lib/vod-details/vod-details-route.component.ts`
+- `/Users/4gray/Code/iptvnator/libs/portal/xtream/feature/src/lib/serial-details/serial-details.component.ts`
+
+Stalker detail hosts:
+
+- `/Users/4gray/Code/iptvnator/libs/portal/stalker/feature/src/lib/stalker-catalog-detail/stalker-catalog-detail.component.ts`
+- `/Users/4gray/Code/iptvnator/libs/portal/stalker/feature/src/lib/stalker-series-view/stalker-series-view.component.ts`
+- `/Users/4gray/Code/iptvnator/libs/portal/stalker/feature/src/lib/stalker-collection-detail.component.ts`
+- `/Users/4gray/Code/iptvnator/libs/portal/stalker/feature/src/lib/stalker-search/stalker-search.component.ts`
+
+Embedded playback does not have a fallback dialog path.
+`PlayerService.openResolvedPlayback(...)` remains the MPV/VLC external launch
+entry point; for embedded players it returns without creating UI.
+
+Diagnostics and fallback UI:
+
+- `/Users/4gray/Code/iptvnator/libs/ui/playback/src/lib/playback-diagnostics/playback-diagnostics.util.ts`
+- `/Users/4gray/Code/iptvnator/libs/ui/playback/src/lib/web-player-view/web-player-view.component.ts`
+
+## Playback Decision Rule
+
+When a detail view starts playback:
+
+1. Resolve or construct a typed playback payload.
+2. Check the active player setting.
+3. If the player is embedded, render the inline player inside the current detail view.
+4. If the player is external, hand the same payload to `PlayerService` for MPV/VLC playback.
+
+The detail or collection/search host owns inline state. `PlayerService` is not
+an owner of embedded UI playback state.
+
+After a successful external episode launch, the detail host immediately
+persists that episode as the latest playback-position entry, preserving an
+existing resume offset or using zero for a newly opened episode. MPV/VLC
+position telemetry overwrites this launch marker when available. This keeps the
+last-watched season and episode correct even when an external player's progress
+interface is unavailable; exact external timestamps remain best-effort.
+
+## Series Quick Start CTA
+
+Xtream and Stalker series detail views share the quick-start decision helper in
+`libs/portal/shared/util/src/lib/series-quick-start.ts`.
+The helper flattens the loaded season/episode map, sorts seasons and episodes in
+natural order, and returns the hero CTA state.
+
+Current contract:
+
+- the CTA shows the action label plus a compact episode target such as
+  `S01E02 · Episode title`
+- if an episode is in progress, resume the latest updated in-progress episode
+  with its saved offset
+- if the newest episode entry is a successful external-player launch marker
+  with no meaningful progress yet, target it with `Play episode N` instead of
+  falling back to the first episode
+- if no episode is in progress, play the first unwatched episode in season order
+- if watched episodes end at a season boundary, play the first episode of the
+  next loaded season
+- if every loaded episode is watched, render a disabled completed state
+
+The click path must continue through each detail host's normal episode playback
+method so recent-item updates, inline/external player selection, resume offsets,
+and playback-position saving keep the same behavior as manual episode clicks.
+
+## Series Inline Episode Continuation
+
+Xtream and Stalker series detail views own current-episode state and pass a
+`SeriesPlaybackNavigation` payload through `PortalInlinePlayerComponent` and
+`WebPlayerViewComponent` to the active embedded player.
+
+Current contract:
+
+- Video.js, HTML5, ArtPlayer, and embedded MPV emit `playbackEnded` only for
+  real media EOF/`ended` events.
+- Teardown, replacement, manual close, player reload, idle state, and playback
+  errors must not emit `playbackEnded`.
+- Series previous/next controls render only when the series navigation payload is
+  present. Movies, live streams, radio streams, and non-series VOD must not show
+  those buttons.
+- The shared navigation payload contains `canPrevious`, `canNext`, and
+  `autoplayEnabled`. Player controls disable previous on the first episode and
+  next on the last episode of the current season.
+- Autoplay is enabled by default for series playback. On `playbackEnded`, the
+  portal detail host starts the next episode only when `canNext` is true for the
+  current season.
+- Autoplay and Next never cross season boundaries or lazy-load another season.
+  Quick start remains the flow that may choose an episode from another loaded or
+  newly loaded season before playback begins.
+- Previous switches directly to the previous episode in the current season. It
+  does not implement a restart-threshold behavior.
+
+## Codec And Container Diagnostics
+
+The shared `WebPlayerViewComponent` is the central browser-player viewport for M3U, Xtream, and Stalker inline playback, including live streams opened from favorites and recently viewed collections. Video.js, HTML5, and ArtPlayer report native media errors, HLS.js errors, mpegts.js errors, and HLS manifest codec metadata into the shared diagnostics classifier.
+
+The diagnostics remain client-only:
+
+- no ffprobe or server-side probing
+- no extra manifest fetch beyond the active player
+- no automatic failover to an external player
+- no embedded MPV diagnostics
+
+Supported diagnostic codes are:
+
+- `unsupported-container`
+- `unsupported-codec`
+- `media-decode-error`
+- `network-error`
+- `browser-access-error`
+- `drm-or-encryption`
+- `unknown-playback-error`
+
+`network-error` is reserved for provider/network loading failures. Browser security failures such as CORS, mixed content, Content Security Policy, and private-network-access blocks are classified as `browser-access-error` so the UI can explain that the browser player was blocked before playback reached decoding.
+
+mpegts.js `Early-EOF` failures on MPEG-TS streams are classified as `media-decode-error` instead of generic `network-error`. These failures usually mean the fetch stream ended before mpegts.js expected a complete transport stream, and external players may still handle the same URL more tolerant of short reads or malformed TS boundaries.
+
+The diagnostic surface covers the inline player viewport when playback fails, with a compact warning badge, a native-player fallback headline, and player-card actions for configured external players. It exposes technical details on demand: diagnostic code, reporting player/source, detected container/MIME, video/audio codecs, native browser error fields, and raw HLS/mpegts details. HLS manifest codec metadata also drives a concise browser-support hint for codecs that Chromium/Electron commonly cannot decode inline, such as HEVC, AC-3, E-AC-3, DTS, and MPEG-2 video.
+
+URL extension metadata is filtered before diagnostics and player selection use it. Web script extensions such as `.php` are not shown as stream containers; explicit media query metadata such as `extension=ts` or `format=m3u8` is preferred when present.
+
+MKV sources are attempted through Chromium's native Matroska path. Video.js
+receives `video/matroska` for `.mkv` URLs and explicit query metadata such as
+`extension=mkv` or `container=mkv`; ArtPlayer and HTML5 continue to use their
+native video paths. This is container support rather than a universal codec
+guarantee: native source or decode failures still produce the existing
+diagnostic and explicit MPV/VLC fallback.
+
+Portal VOD and episode payloads with `contentInfo` are treated as non-live by the inline players unless `isLive` is explicitly set. If Chromium leaves the underlying MediaSource duration at `Infinity` for a finite TS VOD, the Video.js wrapper normalizes its UI duration from the finite `seekable` or `buffered` range. Embedded MPV uses the same live decision rule and shows an unknown duration placeholder for VOD/episode snapshots until MPV reports a finite duration. This removes the misleading `LIVE` control state without changing stream decoding, diagnostics, or external fallback behavior.
+
+When a diagnostic is actionable in Electron, the diagnostic surface may offer `Open in MPV`, `Open in VLC`, `Copy URL`, technical details, and `Retry`. Web builds only expose copy/help text and retry. MPV/VLC fallback requests carry the original `ResolvedPortalPlayback` payload so headers, referer, origin, user-agent, content metadata, and resume offset stay intact. Retry clears the current diagnostic and rebuilds the active inline player inputs; it does not change the saved player setting.
+
+`PortalPlayer.openExternalPlayback(playback, player)` is the forced external launch API. It sends the playback payload to MPV or VLC regardless of the current saved player setting, so fallback buttons do not mutate preferences.
+
+## External Player Arguments
+
+Electron settings expose optional MPV and VLC command-line argument fields only
+when the corresponding external player is selected. The executable path remains a
+path-only setting; extra flags are stored separately as `mpvPlayerArguments` and
+`vlcPlayerArguments`.
+
+Argument fields are line-oriented: one non-empty trimmed line becomes one argv
+entry. IPTVnator prepends those custom entries before its stream-specific runtime
+arguments, then keeps the stream URL last. This avoids shell parsing, keeps paths
+with spaces safe, and preserves existing settings for users who never configured
+extra arguments.
+
+The arguments apply only when IPTVnator spawns a new external player process. If
+MPV or VLC instance reuse is active and an existing process is reused, subsequent
+streams are loaded through MPV IPC or VLC RC commands and new process arguments
+are not re-applied until a fresh process starts.
+
+## Electron External Player Ownership
+
+External MPV/VLC integration is split across focused main-process modules:
+
+- `apps/electron-backend/src/app/events/player.events.ts` registers IPC handlers
+  and settings updates only.
+- `apps/electron-backend/src/app/events/external-player-launch-context.ts`
+  resolves Flatpak spawning, default executable paths, macOS `.app` bundles,
+  custom argv merging, spawn specs, and reuse decisions.
+- `apps/electron-backend/src/app/events/external-player-playback-request.ts`
+  builds the effective playback request, including Stalker direct-stream fallback
+  metadata and external-player request headers.
+- `apps/electron-backend/src/app/events/external-player-runtime.ts` owns shared
+  session tracking, trace logging, renderer notifications, playback-position
+  forwarding, and user-facing start errors.
+- `apps/electron-backend/src/app/events/mpv-session.service.ts` owns MPV process,
+  socket, reuse, cleanup, and progress polling lifecycle.
+- `apps/electron-backend/src/app/events/vlc-session.service.ts` owns VLC process,
+  RC interface, reuse, cleanup, command parsing, and progress polling lifecycle.
+
+Keep player-specific process state in the MPV/VLC session modules. Shared spawn,
+request-header, session-registry, and notification helpers belong in the
+`external-player-*` modules so IPC registration stays small and reviewable.
+
+## Flatpak External Players
+
+Flatpak cannot execute host-installed `mpv` or `vlc` binaries directly from the sandbox.
+
+Current contract:
+
+- Flatpak launches external players through `flatpak-spawn --host`.
+- AppImage, deb/rpm, snap, macOS, and Windows keep the existing direct process spawn flow.
+- VLC keeps the current external-session flow in Flatpak, including the RC port used for progress polling.
+- MPV is intentionally reduced in Flatpak: the app does not reuse an existing MPV instance there and does not open the Unix socket bridge used for non-Flatpak progress polling.
+- VLC instance reuse is also gated off in Flatpak. Outside Flatpak the user can opt in via the "Reuse VLC instance" setting; the app then keeps a single tracked VLC process and drives subsequent stream loads through its RC interface (`clear` + `add <url> :http-*`) instead of spawning a new window per click.
+
+This keeps non-Flatpak behavior unchanged while allowing Flatpak builds to open host-installed external players.
+
+## Typed Playback Payload
+
+Shared playback payloads live in:
+
+- `/Users/4gray/Code/iptvnator/libs/shared/interfaces/src/lib/portal-playback.interface.ts`
+
+Types introduced:
+
+- `PlayerContentInfo`
+- `ResolvedPortalPlayback`
+
+These provide a single shape for:
+
+- `streamUrl`
+- `title`
+- optional thumbnail and resume start time
+- playback-position metadata
+- optional external-player headers and request metadata
+
+## Xtream Behavior
+
+Xtream detail views already own canonical routes, so they construct playback locally and decide inline vs external locally.
+
+Behavior to preserve:
+
+- resume/playback position continues saving from `timeUpdate`
+- back navigation clears inline playback with the route
+- favorites, recent, and search still route into canonical Xtream detail screens before playback
+
+## Stalker Behavior
+
+Stalker previously resolved playback and opened UI in the same method.
+
+Current contract:
+
+- `resolveVodPlayback(...)` returns a `ResolvedPortalPlayback`
+- `createLinkToPlayVod(...)` remains as a compatibility API but collection,
+  search, and canonical detail views use the resolver directly
+- Stalker detail, collection, and search views decide inline vs external locally
+
+This keeps:
+
+- inline/store-state detail navigation intact
+- series and VOD-as-series support intact
+- external MPV/VLC launches unchanged
+
+## Playback Position Saving
+
+The old dialog path saved playback positions from inside the removed Xtream
+player dialog.
+
+The new contract is:
+
+- inline detail hosts listen to `timeUpdate`
+- each host throttles saves
+- each host persists via existing playback-position infrastructure
+
+This avoids coupling inline UI state to a global dialog.
+
+## Future Migration Rule
+
+If a non-detail surface needs embedded playback:
+
+- give that surface a canonical inline host
+- switch it to `ResolvedPortalPlayback`
+- do not move portal-specific navigation into `PlayerService`
+
+The preferred direction is view-owned inline playback, not a larger dialog manager.
