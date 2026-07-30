@@ -5,6 +5,7 @@
 }
 
 .app-rail {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -40,6 +41,19 @@
     &::-webkit-scrollbar {
         display: none;
     }
+}
+
+.rail-navigation {
+    display: contents;
+}
+
+.mobile-menu-toggle,
+.mobile-menu-close {
+    display: none;
+}
+
+.rail-link-label {
+    display: none;
 }
 
 .app-rail a {
@@ -232,75 +246,231 @@
     .app-rail {
         flex-direction: row;
         justify-content: flex-start;
-        gap: 4px;
+        align-items: center;
+        gap: 0;
         padding: max(4px, env(safe-area-inset-top, 0px))
             max(8px, env(safe-area-inset-right, 0px)) 4px
             max(8px, env(safe-area-inset-left, 0px));
         border-right: none;
         border-bottom: 1px solid var(--mat-sys-outline-variant);
-        overflow-x: auto;
-        overflow-y: hidden;
-        overscroll-behavior-x: contain;
-        touch-action: pan-x;
+        overflow: visible;
+        app-region: drag;
 
-        .brand {
-            margin-bottom: 0;
-            flex: 0 0 auto;
+        &.is-macos {
+            padding-top: max(4px, env(safe-area-inset-top, 0px));
         }
 
-        > app-workspace-shell-rail-links {
-            flex: 0 0 auto;
+        a {
+            width: 100%;
+            min-height: 44px;
+            height: auto;
+            justify-content: flex-start;
+            gap: 12px;
+            padding: 8px 12px;
+            box-sizing: border-box;
         }
 
         a.is-active::after,
         a.active::after {
-            top: auto;
+            top: 50%;
             right: auto;
-            bottom: -3px;
-            left: 50%;
-            width: 20px;
-            height: 3px;
-            transform: translateX(-50%);
+            bottom: auto;
+            left: -1px;
+            width: 3px;
+            height: 20px;
+            transform: translateY(-50%);
+        }
+    }
+
+    .mobile-menu-toggle {
+        position: relative;
+        z-index: 104;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 44px;
+        height: 44px;
+        min-width: 44px;
+        padding: 0;
+        border: 0;
+        border-radius: 12px;
+        color: var(--app-on-surface);
+        background: transparent;
+        cursor: pointer;
+        app-region: no-drag;
+        touch-action: manipulation;
+
+        &:hover,
+        &:focus-visible {
+            background: var(--app-hover-overlay);
+        }
+
+        &:focus-visible {
+            outline: 2px solid var(--app-selection-color);
+            outline-offset: 2px;
+        }
+
+        mat-icon {
+            width: 24px;
+            height: 24px;
+            font-size: 24px;
+        }
+    }
+
+    .mobile-menu-close {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 44px;
+        height: 44px;
+        min-width: 44px;
+        flex: 0 0 44px;
+        padding: 0;
+        border: 0;
+        border-radius: 12px;
+        color: var(--app-on-surface);
+        background: transparent;
+        cursor: pointer;
+        app-region: no-drag;
+
+        &:hover,
+        &:focus-visible {
+            background: var(--app-hover-overlay);
+        }
+
+        &:focus-visible {
+            outline: 2px solid var(--app-selection-color);
+            outline-offset: 2px;
+        }
+
+        mat-icon {
+            width: 24px;
+            height: 24px;
+            font-size: 24px;
+        }
+    }
+
+    .rail-navigation {
+        position: fixed;
+        inset: 0 auto 0 0;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 4px;
+        width: min(320px, calc(100vw - 32px));
+        height: 100dvh;
+        max-height: none;
+        margin: 0;
+        box-sizing: border-box;
+        padding: 12px max(12px, env(safe-area-inset-right, 0px))
+            max(16px, env(safe-area-inset-bottom, 0px))
+            max(12px, env(safe-area-inset-left, 0px));
+        border: 0;
+        border-right: 1px solid var(--app-rail-border);
+        color: var(--app-on-surface);
+        background: var(--app-rail-bg);
+        box-shadow: 18px 0 36px rgba(0, 0, 0, 0.28);
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        app-region: no-drag;
+
+        &:not(:popover-open) {
+            display: none;
+        }
+
+        &:popover-open {
+            display: flex;
+            animation: mobile-menu-enter 0.2s ease-out;
+        }
+
+        &::backdrop {
+            background: color-mix(in srgb, #000 52%, transparent);
+        }
+    }
+
+    .rail-link-label {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        color: inherit;
+        font-size: 0.9rem;
+        font-weight: 600;
+        line-height: 1.25;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .brand {
+        flex: 0 0 auto;
+        margin-bottom: 6px;
+
+        img {
+            flex: 0 0 24px;
         }
     }
 
     .rail-divider {
-        width: 1px;
-        height: 24px;
-        margin: 0 4px;
+        width: 100%;
+        height: 1px;
+        margin: 4px 0;
     }
 
     .rail-context-region {
-        width: auto;
-        flex-direction: row;
-        margin: 0;
-        padding: 2px 4px;
-        border-radius: 10px;
+        width: 100%;
+        max-width: none;
+        flex-direction: column;
+        align-items: stretch;
+        margin: 4px 0;
+        padding: 6px;
+        border-radius: 12px;
+        box-sizing: border-box;
 
         &::before {
-            display: none;
+            left: 16px;
+            right: 16px;
         }
 
         .rail-divider {
-            width: 1px;
-            height: 24px;
-            margin: 0 2px;
+            width: 100%;
+            height: 1px;
+            margin: 4px 0;
         }
     }
 
     .rail-footer {
-        margin-top: 0;
-        margin-left: auto;
-        flex: 0 0 auto;
+        width: 100%;
+        margin-top: auto;
+        margin-left: 0;
+
+        .rail-shortcut {
+            width: 100%;
+            min-height: 44px;
+            height: auto;
+            box-sizing: border-box;
+            justify-content: flex-start;
+            gap: 12px;
+            padding: 8px 12px;
+        }
 
         .rail-shortcut.is-active::after {
-            top: auto;
+            top: 50%;
             right: auto;
-            bottom: -3px;
-            left: 50%;
-            width: 20px;
-            height: 3px;
-            transform: translateX(-50%);
+            bottom: auto;
+            left: -1px;
+            width: 3px;
+            height: 20px;
+            transform: translateY(-50%);
         }
+    }
+}
+
+@keyframes mobile-menu-enter {
+    from {
+        transform: translateX(-24px);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
     }
 }

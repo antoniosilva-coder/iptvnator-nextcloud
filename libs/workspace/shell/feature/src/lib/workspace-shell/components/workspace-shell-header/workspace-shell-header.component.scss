@@ -98,6 +98,7 @@
 
     input {
         flex: 1;
+        min-width: 0;
         border: none;
         outline: none;
         background: transparent;
@@ -291,15 +292,68 @@
 }
 
 @media (max-width: 640px) {
+    .workspace-header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto auto;
+        grid-template-areas:
+            'playlist leading trailing'
+            'search search search';
+        align-items: center;
+        gap: 8px;
+        height: auto;
+        min-height: 104px;
+        box-sizing: border-box;
+        padding: 8px max(8px, env(safe-area-inset-right, 0px)) 8px
+            max(8px, env(safe-area-inset-left, 0px));
+    }
+
     .playlist-switcher {
+        grid-area: playlist;
         width: auto;
-        min-width: 140px;
+        min-width: 0;
         flex: 1;
     }
 
     .search-field {
+        grid-area: search;
+        width: 100%;
+        min-width: 0;
+        max-width: none;
+        height: 44px;
+        box-sizing: border-box;
+
+        .search-chip--scope {
+            max-width: min(116px, 34vw);
+        }
+
         .search-chip--status {
             display: none;
+        }
+
+        .command-trigger {
+            min-width: 44px;
+            height: 36px;
+            padding-inline: 6px;
+        }
+    }
+
+    .header-actions--leading {
+        grid-area: leading;
+        margin-left: 0;
+    }
+
+    .header-actions--trailing {
+        grid-area: trailing;
+        margin-left: 0;
+        padding-left: 0;
+        border-left: 0;
+    }
+
+    .header-actions {
+        button,
+        a {
+            min-width: 44px;
+            min-height: 44px;
         }
     }
 }

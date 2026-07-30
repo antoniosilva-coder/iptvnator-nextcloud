@@ -44,6 +44,10 @@
     }
 }
 
+.rail-link-label {
+    display: none;
+}
+
 @for $i from 1 through 8 {
     .portal-rail-link:nth-child(#{$i}) {
         animation-delay: #{($i - 1) * 30}ms;
@@ -97,29 +101,47 @@
 
 @media (max-width: 640px) {
     :host {
-        display: flex;
-        flex: 0 0 auto;
-        width: auto;
+        display: block;
+        width: 100%;
         min-width: 0;
     }
 
     .rail-links {
-        flex-direction: row;
-        width: auto;
+        flex-direction: column;
+        align-items: stretch;
+        width: 100%;
+        gap: 4px;
     }
 
     .portal-rail-link {
-        flex: 0 0 44px;
+        width: 100%;
+        min-height: 44px;
+        height: auto;
+        box-sizing: border-box;
+        justify-content: flex-start;
+        gap: 12px;
+        padding: 8px 12px;
     }
 
     .portal-rail-link.is-active::after,
     .portal-rail-link.active::after {
-        top: auto;
+        top: 50%;
         right: auto;
-        bottom: -3px;
-        left: 50%;
-        width: 20px;
-        height: 3px;
-        transform: translateX(-50%);
+        bottom: auto;
+        left: -1px;
+        width: 3px;
+        height: 20px;
+        transform: translateY(-50%);
+    }
+
+    .rail-link-label {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        font-size: 0.9rem;
+        font-weight: 600;
+        line-height: 1.25;
+        text-overflow: ellipsis;
+        white-space: nowrap;
     }
 }
